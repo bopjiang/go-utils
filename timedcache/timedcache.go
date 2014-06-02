@@ -1,66 +1,93 @@
 package timedcache
 
-import(
-    "fmt"
-    "time"
-    "container/list"
+import (
+	"container/list"
+	"time"
+	"sync"
 )
 
-const INIT_CACHE_SIZE = 100*1000
+const INIT_CACHE_SIZE = 100 * 1000
 
-type KeyType uint64
-type ValueType bool
-const DEFAULT_VALUE ValueType = false 
-
-type cacheItem struct{
-    value ValueType
-    expireTime time.Time
+type cacheItem struct {
+	key        interface{}
+	value      interface{}
+	expireTime time.Time
 }
-type TimedCache struct{
-    items map[KeyType] *list.Element
-    expireList *list.List
-    expireInterval time.Duration
-}
-
-func New() *TimedCache{
-    return &TimedCache{
-        items : make(map[KeyType] *list.Element, INIT_CACHE_SIZE),
-        expireList : list.New(),
-        expireInterval : time.Second,
-    }
+type TimedCache struct {
+ 	sync.Mutex
+	items          map[interface{}]*list.Element
+	expireList     *list.List
+	expireInterval time.Duration
+	timeToLive     time.Duration
 }
 
-func (c *TimedCache) Set(key KeyType, value ValueType){
-    var item *cacheItem
-    if e, have := c.items[key]; have{
-        var ok bool
-        item, ok = e.Value.(*cacheItem)
-        if !ok{
-            panic(fmt.Sprintf("Invalid value for timedcache, key=%v", key))
-        }
-        c.expireList.MoveToBack(e)
-    }else{
-        item = &cacheItem{
-            value : value,
-        }
-        newElem := c.expireList.PushBack(item)
-        c.items[key] = newElem
-    }
+func New() *TimedCache {
+	c :=  &TimedCache{
+		items:          make(map[interface{}]*list.Element, INIT_CACHE_SIZE),
+		expireList:     list.New(),
+		timeToLive: time.Second*10,
+		expireInterval: time.Second,
+	}
 
-    item.expireTime = time.Now()
+	go c.expireCheckLoop()
+
+	return c
 }
 
-func (c *TimedCache) Get(key KeyType) (ValueType, bool){
-    var item *cacheItem
-    if e, have := c.items[key]; have{
-        var ok bool
-        item, ok = e.Value.(*cacheItem)
-        if !ok{
-            panic(fmt.Sprintf("Invalid value for timedcache, key=%v", key))
-        }
+func (c *TimedCache) Set(key interface{}, value interface{}) {
+	c.Lock()
+	defer c.Unlock()
+	var item *cacheItem
+	if e, have := c.items[key]; have {
+		item, _ = e.Value.(*cacheItem)
+		c.expireList.MoveToBack(e)
+	} else {
+		item = &cacheItem{
+			key:key,
+			value: value,
+		}
+		newElem := c.expireList.PushBack(item)
+		c.items[key] = newElem
+	}
 
-        return item.value, true
-    }else{
-        return DEFAULT_VALUE, false
-    }
+	item.expireTime = time.Now()
+}
+
+func (c *TimedCache) Get(key interface{}) (interface{}, bool) {
+	c.Lock()
+	defer c.Unlock()
+	var item *cacheItem
+	if e, have := c.items[key]; have {
+		item, _ = e.Value.(*cacheItem)
+		return item.value, true
+	} else {
+		return nil, false
+	}
+}
+
+func (c* TimedCache)expireCheckLoop(){
+	t := time.NewTicker(c.expireInterval)
+	for{
+		select{
+		case <-t.C:
+			c.expire()
+		}
+	}
+}
+
+func (c *TimedCache)expire(){
+	c.Lock()
+	defer c.Unlock()
+	now := time.Now()
+	for e := c.expireList.Front(); e != nil; {
+		next := e.Next()
+		item := e.Value.(*cacheItem)
+		if item.expireTime.After(now){
+			break
+		}
+
+		c.expireList.Remove(e)
+		delete(c.items, item.key)
+		e = next
+	}
 }
